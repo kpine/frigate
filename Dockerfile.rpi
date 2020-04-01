@@ -22,7 +22,7 @@ RUN install_packages \
       libjasper1 \
       libopenexr23 \
 # Coral EdgeTPU dependencies
-      libedgetpu1-max=13.0 \
+      libedgetpu1-max=14.0 \
 # Frigate dependencies
       python3-numpy \
       python3-scipy \
