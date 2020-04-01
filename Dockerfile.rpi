@@ -39,7 +39,6 @@ COPY dist/*.whl /tmp/
 # 4.1.1.26 wheel is currently broken: https://github.com/piwheels/packages/issues/59
 RUN pip3 install --extra-index-url https://www.piwheels.org/simple \
       opencv-python-headless==4.1.0.25 \
-      SharedArray==3.0.* \
       imutils==0.5.* \
       /tmp/*.whl \
       https://dl.google.com/coral/python/tflite_runtime-2.1.0.post1-cp37-cp37m-linux_armv7l.whl \
