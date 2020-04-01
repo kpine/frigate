@@ -1,4 +1,7 @@
 import os
+import sys
+import traceback
+import signal
 import cv2
 import time
 import datetime
@@ -12,7 +15,7 @@ import logging
 from flask import Flask, Response, make_response, jsonify, request
 import paho.mqtt.client as mqtt
 
-from frigate.video import track_camera
+from frigate.video import track_camera, get_ffmpeg_input, get_frame_shape, CameraCapture, start_or_restart_ffmpeg
 from frigate.object_processing import TrackedObjectProcessor
 from frigate.util import EventsPerSecond
 from frigate.edgetpu import EdgeTPUProcess
@@ -58,41 +61,72 @@ GLOBAL_OBJECT_CONFIG = CONFIG.get('objects', {})
 WEB_PORT = CONFIG.get('web_port', 5000)
 DEBUG = (CONFIG.get('debug', '0') == '1')
 
+def start_plasma_store():
+    plasma_cmd = ['plasma_store', '-m', '400000000', '-s', '/tmp/plasma']
+    plasma_process = sp.Popen(plasma_cmd, stdout=sp.DEVNULL)
+    time.sleep(1)
+    rc = plasma_process.poll()
+    if rc is not None:
+        return None
+    return plasma_process
+
 class CameraWatchdog(threading.Thread):
-    def __init__(self, camera_processes, config, tflite_process, tracked_objects_queue, object_processor):
+    def __init__(self, camera_processes, config, tflite_process, tracked_objects_queue, plasma_process):
         threading.Thread.__init__(self)
         self.camera_processes = camera_processes
         self.config = config
         self.tflite_process = tflite_process
         self.tracked_objects_queue = tracked_objects_queue
-        self.object_processor = object_processor
+        self.plasma_process = plasma_process
 
     def run(self):
         time.sleep(10)
         while True:
             # wait a bit before checking
-            time.sleep(30)
+            time.sleep(10)
+            
+            # check the plasma process
+            rc = self.plasma_process.poll()
+            if rc != None:
+                print(f"plasma_process exited unexpectedly with {rc}")
+                self.plasma_process = start_plasma_store()
 
+            # check the detection process
             if (self.tflite_process.detection_start.value > 0.0 and 
                 datetime.datetime.now().timestamp() - self.tflite_process.detection_start.value > 10):
                 print("Detection appears to be stuck. Restarting detection process")
                 self.tflite_process.start_or_restart()
-                time.sleep(30)
+            elif not self.tflite_process.detect_process.is_alive():
+                print("Detection appears to have stopped. Restarting detection process")
+                self.tflite_process.start_or_restart()
 
+            # check the camera processes
             for name, camera_process in self.camera_processes.items():
                 process = camera_process['process']
                 if not process.is_alive():
-                    print(f"Process for {name} is not alive. Starting again...")
+                    print(f"Track process for {name} is not alive. Starting again...")
                     camera_process['fps'].value = float(self.config[name]['fps'])
                     camera_process['skipped_fps'].value = 0.0
                     camera_process['detection_fps'].value = 0.0
-                    process = mp.Process(target=track_camera, args=(name, self.config[name], FFMPEG_DEFAULT_CONFIG, GLOBAL_OBJECT_CONFIG, 
-                        self.tflite_process.detection_queue, self.tracked_objects_queue, 
-                        camera_process['fps'], camera_process['skipped_fps'], camera_process['detection_fps']))
+                    camera_process['read_start'].value = 0.0
+                    process = mp.Process(target=track_camera, args=(name, self.config[name], GLOBAL_OBJECT_CONFIG, camera_process['frame_queue'],
+                        camera_process['frame_shape'], self.tflite_process.detection_queue, self.tracked_objects_queue, 
+                        camera_process['fps'], camera_process['skipped_fps'], camera_process['detection_fps'],
+                        camera_process['read_start']))
                     process.daemon = True
                     camera_process['process'] = process
                     process.start()
-                    print(f"Camera_process started for {name}: {process.pid}")
+                    print(f"Track process started for {name}: {process.pid}")
+                
+                if not camera_process['capture_thread'].is_alive():
+                    frame_shape = camera_process['frame_shape']
+                    frame_size = frame_shape[0] * frame_shape[1] * frame_shape[2]
+                    ffmpeg_process = start_or_restart_ffmpeg(camera_process['ffmpeg_cmd'], frame_size)
+                    camera_capture = CameraCapture(name, ffmpeg_process, frame_shape, camera_process['frame_queue'], 
+                        camera_process['take_frame'], camera_process['camera_fps'])
+                    camera_capture.start()
+                    camera_process['ffmpeg_process'] = ffmpeg_process
+                    camera_process['capture_thread'] = camera_capture
 
 def main():
     # connect to mqtt and setup last will
@@ -117,14 +151,7 @@ def main():
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.loop_start()
 
-    # start plasma store
-    plasma_cmd = ['plasma_store', '-m', '400000000', '-s', '/tmp/plasma']
-    plasma_process = sp.Popen(plasma_cmd, stdout=sp.DEVNULL)
-    time.sleep(1)
-    rc = plasma_process.poll()
-    if rc is not None:
-        raise RuntimeError("plasma_store exited unexpectedly with "
-                            "code %d" % (rc,))
+    plasma_process = start_plasma_store()
 
     ##
     # Setup config defaults for cameras
@@ -135,7 +162,7 @@ def main():
         }
 
     # Queue for cameras to push tracked objects to
-    tracked_objects_queue = mp.Queue()
+    tracked_objects_queue = mp.SimpleQueue()
     
     # Start the shared tflite process
     tflite_process = EdgeTPUProcess()
@@ -143,14 +170,54 @@ def main():
     # start the camera processes
     camera_processes = {}
     for name, config in CONFIG['cameras'].items():
+        # Merge the ffmpeg config with the global config
+        ffmpeg = config.get('ffmpeg', {})
+        ffmpeg_input = get_ffmpeg_input(ffmpeg['input'])
+        ffmpeg_global_args = ffmpeg.get('global_args', FFMPEG_DEFAULT_CONFIG['global_args'])
+        ffmpeg_hwaccel_args = ffmpeg.get('hwaccel_args', FFMPEG_DEFAULT_CONFIG['hwaccel_args'])
+        ffmpeg_input_args = ffmpeg.get('input_args', FFMPEG_DEFAULT_CONFIG['input_args'])
+        ffmpeg_output_args = ffmpeg.get('output_args', FFMPEG_DEFAULT_CONFIG['output_args'])
+        ffmpeg_cmd = (['ffmpeg'] +
+                ffmpeg_global_args +
+                ffmpeg_hwaccel_args +
+                ffmpeg_input_args +
+                ['-i', ffmpeg_input] +
+                ffmpeg_output_args +
+                ['pipe:'])
+        
+        if 'width' in config and 'height' in config:
+            frame_shape = (config['height'], config['width'], 3)
+        else:
+            frame_shape = get_frame_shape(ffmpeg_input)
+
+        frame_size = frame_shape[0] * frame_shape[1] * frame_shape[2]
+        take_frame = config.get('take_frame', 1)
+
+        ffmpeg_process = start_or_restart_ffmpeg(ffmpeg_cmd, frame_size)
+        frame_queue = mp.SimpleQueue()
+        camera_fps = EventsPerSecond()
+        camera_fps.start()
+        camera_capture = CameraCapture(name, ffmpeg_process, frame_shape, frame_queue, take_frame, camera_fps)
+        camera_capture.start()
+
         camera_processes[name] = {
+            'camera_fps': camera_fps,
+            'take_frame': take_frame,
             'fps': mp.Value('d', float(config['fps'])),
             'skipped_fps': mp.Value('d', 0.0),
-            'detection_fps': mp.Value('d', 0.0)
+            'detection_fps': mp.Value('d', 0.0),
+            'read_start': mp.Value('d', 0.0),
+            'ffmpeg_process': ffmpeg_process,
+            'ffmpeg_cmd': ffmpeg_cmd,
+            'frame_queue': frame_queue,
+            'frame_shape': frame_shape,
+            'capture_thread': camera_capture
         }
-        camera_process = mp.Process(target=track_camera, args=(name, config, FFMPEG_DEFAULT_CONFIG, GLOBAL_OBJECT_CONFIG, 
-            tflite_process.detection_queue, tracked_objects_queue, 
-            camera_processes[name]['fps'], camera_processes[name]['skipped_fps'], camera_processes[name]['detection_fps']))
+
+        camera_process = mp.Process(target=track_camera, args=(name, config, GLOBAL_OBJECT_CONFIG, frame_queue, frame_shape,
+            tflite_process.detection_queue, tracked_objects_queue, camera_processes[name]['fps'], 
+            camera_processes[name]['skipped_fps'], camera_processes[name]['detection_fps'], 
+            camera_processes[name]['read_start']))
         camera_process.daemon = True
         camera_processes[name]['process'] = camera_process
 
@@ -161,7 +228,7 @@ def main():
     object_processor = TrackedObjectProcessor(CONFIG['cameras'], client, MQTT_TOPIC_PREFIX, tracked_objects_queue)
     object_processor.start()
     
-    camera_watchdog = CameraWatchdog(camera_processes, CONFIG['cameras'], tflite_process, tracked_objects_queue, object_processor)
+    camera_watchdog = CameraWatchdog(camera_processes, CONFIG['cameras'], tflite_process, tracked_objects_queue, plasma_process)
     camera_watchdog.start()
 
     # create a flask app that encodes frames a mjpeg on demand
@@ -174,6 +241,23 @@ def main():
         # return a healh
         return "Frigate is running. Alive and healthy!"
 
+    @app.route('/debug/stack')
+    def processor_stack():
+        frame = sys._current_frames().get(object_processor.ident, None)
+        if frame:
+            return "<br>".join(traceback.format_stack(frame)), 200
+        else:
+            return "no frame found", 200
+
+    @app.route('/debug/print_stack')
+    def print_stack():
+        pid = int(request.args.get('pid', 0))
+        if pid == 0:
+            return "missing pid", 200
+        else:
+            os.kill(pid, signal.SIGUSR1)
+            return "check logs", 200
+
     @app.route('/debug/stats')
     def stats():
         stats = {}
@@ -185,20 +269,21 @@ def main():
             stats[name] = {
                 'fps': round(camera_stats['fps'].value, 2),
                 'skipped_fps': round(camera_stats['skipped_fps'].value, 2),
-                'detection_fps': round(camera_stats['detection_fps'].value, 2)
+                'detection_fps': round(camera_stats['detection_fps'].value, 2),
+                'read_start': camera_stats['read_start'].value,
+                'pid': camera_stats['process'].pid,
+                'ffmpeg_pid': camera_stats['ffmpeg_process'].pid
             }
         
         stats['coral'] = {
             'fps': round(total_detection_fps, 2),
             'inference_speed': round(tflite_process.avg_inference_speed.value*1000, 2),
-            'detection_queue': tflite_process.detection_queue.qsize(),
-            'detection_start': tflite_process.detection_start.value
+            'detection_start': tflite_process.detection_start.value,
+            'pid': tflite_process.detect_process.pid
         }
 
-        rc = plasma_process.poll()
+        rc = camera_watchdog.plasma_process.poll()
         stats['plasma_store_rc'] = rc
-
-        stats['tracked_objects_queue'] = tracked_objects_queue.qsize()
 
         return jsonify(stats)
 
@@ -244,7 +329,7 @@ def main():
 
     app.run(host='0.0.0.0', port=WEB_PORT, debug=False)
 
-    camera_watchdog.join()
+    object_processor.join()
     
     plasma_process.terminate()
 

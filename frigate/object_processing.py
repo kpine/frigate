@@ -1,6 +1,7 @@
 import json
 import hashlib
 import datetime
+import time
 import copy
 import cv2
 import threading
@@ -8,9 +9,8 @@ import numpy as np
 from collections import Counter, defaultdict
 import itertools
 import pyarrow.plasma as plasma
-import SharedArray as sa
 import matplotlib.pyplot as plt
-from frigate.util import draw_box_with_label
+from frigate.util import draw_box_with_label, PlasmaManager
 from frigate.edgetpu import load_labels
 
 PATH_TO_LABELS = '/labelmap.txt'
@@ -29,7 +29,6 @@ class TrackedObjectProcessor(threading.Thread):
         self.client = client
         self.topic_prefix = topic_prefix
         self.tracked_objects_queue = tracked_objects_queue
-        self.plasma_client = plasma.connect("/tmp/plasma")
         self.camera_data = defaultdict(lambda: {
             'best_objects': {},
             'object_status': defaultdict(lambda: defaultdict(lambda: 'OFF')),
@@ -37,6 +36,7 @@ class TrackedObjectProcessor(threading.Thread):
             'current_frame': np.zeros((720,1280,3), np.uint8),
             'object_id': None
         })
+        self.plasma_client = PlasmaManager()
         
     def get_best(self, camera, label):
         if label in self.camera_data[camera]['best_objects']:
@@ -59,10 +59,7 @@ class TrackedObjectProcessor(threading.Thread):
             ###
             # Draw tracked objects on the frame
             ###
-            object_id_hash = hashlib.sha1(str.encode(f"{camera}{frame_time}"))
-            object_id_bytes = object_id_hash.digest()
-            object_id = plasma.ObjectID(object_id_bytes)
-            current_frame = self.plasma_client.get(object_id, timeout_ms=0)
+            current_frame = self.plasma_client.get(f"{camera}{frame_time}")
 
             if not current_frame is plasma.ObjectNotAvailable:
                 # draw the bounding boxes on the frame
@@ -91,10 +88,10 @@ class TrackedObjectProcessor(threading.Thread):
                 self.camera_data[camera]['current_frame'] = current_frame
 
                 # store the object id, so you can delete it at the next loop
-                previous_object_id = self.camera_data[camera]['object_id']
+                previous_object_id = f"{camera}{frame_time}"
                 if not previous_object_id is None:
-                    self.plasma_client.delete([previous_object_id])
-                self.camera_data[camera]['object_id'] = object_id
+                    self.plasma_client.delete(f"{camera}{frame_time}")
+                self.camera_data[camera]['object_id'] = f"{camera}{frame_time}"
             
             ###
             # Maintain the highest scoring recent object and frame for each label
