@@ -34,6 +34,7 @@ class TrackedObjectProcessor(threading.Thread):
             'object_status': defaultdict(lambda: defaultdict(lambda: 'OFF')),
             'tracked_objects': {},
             'current_frame': np.zeros((720,1280,3), np.uint8),
+            'current_frame_time': 0.0,
             'object_id': None
         })
         self.plasma_client = PlasmaManager()
@@ -55,6 +56,7 @@ class TrackedObjectProcessor(threading.Thread):
             best_objects = self.camera_data[camera]['best_objects']
             current_object_status = self.camera_data[camera]['object_status']
             self.camera_data[camera]['tracked_objects'] = tracked_objects
+            self.camera_data[camera]['current_frame_time'] = frame_time
 
             ###
             # Draw tracked objects on the frame
@@ -83,14 +85,13 @@ class TrackedObjectProcessor(threading.Thread):
                     cv2.putText(current_frame, time_to_show, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, fontScale=.8, color=(255, 255, 255), thickness=2)
 
                 ###
-                # Set the current frame as ready
+                # Set the current frame
                 ###
                 self.camera_data[camera]['current_frame'] = current_frame
 
-                # store the object id, so you can delete it at the next loop
-                previous_object_id = f"{camera}{frame_time}"
-                if not previous_object_id is None:
-                    self.plasma_client.delete(f"{camera}{frame_time}")
+                # delete the previous frame from the plasma store and update the object id
+                if not self.camera_data[camera]['object_id'] is None:
+                    self.plasma_client.delete(self.camera_data[camera]['object_id'])
                 self.camera_data[camera]['object_id'] = f"{camera}{frame_time}"
             
             ###
