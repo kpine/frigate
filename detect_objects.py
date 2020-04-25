@@ -63,7 +63,7 @@ DEBUG = (CONFIG.get('debug', '0') == '1')
 
 def start_plasma_store():
     plasma_cmd = ['plasma_store', '-m', '400000000', '-s', '/tmp/plasma']
-    plasma_process = sp.Popen(plasma_cmd, stdout=sp.DEVNULL)
+    plasma_process = sp.Popen(plasma_cmd, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
     time.sleep(1)
     rc = plasma_process.poll()
     if rc is not None:
@@ -92,8 +92,9 @@ class CameraWatchdog(threading.Thread):
                 self.plasma_process = start_plasma_store()
 
             # check the detection process
-            if (self.tflite_process.detection_start.value > 0.0 and 
-                datetime.datetime.now().timestamp() - self.tflite_process.detection_start.value > 10):
+            detection_start = self.tflite_process.detection_start.value
+            if (detection_start > 0.0 and 
+                datetime.datetime.now().timestamp() - detection_start > 10):
                 print("Detection appears to be stuck. Restarting detection process")
                 self.tflite_process.start_or_restart()
             elif not self.tflite_process.detect_process.is_alive():
@@ -328,7 +329,9 @@ def main():
             if frame is None:
                 frame = np.zeros((height,int(height*16/9),3), np.uint8)
 
-            frame = cv2.resize(frame, dsize=(int(height*16/9), height), interpolation=cv2.INTER_LINEAR)
+            width = int(height*frame.shape[1]/frame.shape[0])
+
+            frame = cv2.resize(frame, dsize=(width, height), interpolation=cv2.INTER_LINEAR)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
             ret, jpg = cv2.imencode('.jpg', frame)
