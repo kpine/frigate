@@ -1,3 +1,5 @@
+FROM kpine/raspberrypi-pyarrow-plasma:0.17.1 as pyarrow
+
 FROM balenalib/raspberrypi3-debian:buster-run
 
 # Add the Coral EdgeTPU repository
@@ -32,8 +34,7 @@ RUN install_packages \
       python3-matplotlib \
  && rm -rf /var/lib/apt/lists/*
 
-# Copy custom-built pyarrow wheel
-COPY dist/*.whl /tmp/
+COPY --from=pyarrow /dist/*.whl /tmp/
 
 # opencv and other python packages not available in Debian
 # 4.1.1.26 wheel is currently broken: https://github.com/piwheels/packages/issues/59
