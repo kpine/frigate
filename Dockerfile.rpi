@@ -1,4 +1,5 @@
-FROM kpine/raspberrypi-pyarrow-plasma:0.17.1 as pyarrow
+ARG PYARROW_IMAGE=kpine/raspberrypi-pyarrow-plasma:0.17.1
+FROM ${PYARROW_IMAGE} as pyarrow
 
 FROM balenalib/raspberrypi3-debian:buster-run
 
@@ -43,12 +44,12 @@ RUN install_packages \
       python3-matplotlib \
  && rm -rf /var/lib/apt/lists/*
 
-# Python Arrow from Apache is a Frigate dependency, but Arrow does not support arm7. We use a custom
-# build which contains only Plasma.
+# Python Arrow from Apache is a Frigate dependency, but Arrow does not support arm7, we require a
+# custom wheel.
 COPY --from=pyarrow /dist/*.whl /tmp/
 
-# opencv and other python packages not available in Debian Buster
-# 4.1.1.26 is currently the latest available piwheel build
+# opencv and other python packages not available in Debian Buster 4.1.1.26 is currently the latest
+# available piwheel build
 RUN python3 -m pip install --extra-index-url https://www.piwheels.org/simple \
       opencv-python-headless==4.1.1.26 \
       imutils==0.5.* \
