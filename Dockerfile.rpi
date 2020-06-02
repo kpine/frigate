@@ -17,12 +17,21 @@ RUN install_packages \
 # opencv-python-headless dependencies
       libatk1.0-0 \
       libatlas3-base \
-      libatlas3-base \
+      libavcodec58 \
+      libavformat58 \
+      libavutil56 \
       libcairo-gobject2 \
+      libcairo2 \
+      libgdk-pixbuf2.0-0 \
       libgtk-3-0 \
       libilmbase23 \
       libjasper1 \
       libopenexr23 \
+      libpango-1.0-0 \
+      libpangocairo-1.0-0 \
+      libswscale5 \
+      libtiff5 \
+      libwebp6 \
 # Coral EdgeTPU dependencies
       libedgetpu1-max=14.0 \
 # Frigate dependencies
@@ -34,12 +43,14 @@ RUN install_packages \
       python3-matplotlib \
  && rm -rf /var/lib/apt/lists/*
 
+# Python Arrow from Apache is a Frigate dependency, but Arrow does not support arm7. We use a custom
+# build which contains only Plasma.
 COPY --from=pyarrow /dist/*.whl /tmp/
 
-# opencv and other python packages not available in Debian
-# 4.1.1.26 wheel is currently broken: https://github.com/piwheels/packages/issues/59
-RUN pip3 install --extra-index-url https://www.piwheels.org/simple \
-      opencv-python-headless==4.1.0.25 \
+# opencv and other python packages not available in Debian Buster
+# 4.1.1.26 is currently the latest available piwheel build
+RUN python3 -m pip install --extra-index-url https://www.piwheels.org/simple \
+      opencv-python-headless==4.1.1.26 \
       imutils==0.5.* \
       /tmp/*.whl \
       https://dl.google.com/coral/python/tflite_runtime-2.1.0.post1-cp37-cp37m-linux_armv7l.whl \
@@ -52,6 +63,9 @@ RUN wget -q https://storage.googleapis.com/download.tensorflow.org/models/tflite
  && unzip /cpu_model.zip detect.tflite -d / \
  && mv /detect.tflite /cpu_model.tflite \
  && rm /cpu_model.zip
+
+# piwheels opencv build workaround: https://github.com/piwheels/packages/issues/59
+ENV LD_PRELOAD="/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
 
 WORKDIR /opt/frigate/
 COPY frigate frigate/
