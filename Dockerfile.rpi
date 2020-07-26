@@ -58,12 +58,10 @@ RUN python3 -m pip install --extra-index-url https://www.piwheels.org/simple \
  && rm /tmp/*.whl
 
 # get model and labels
-RUN wget -q https://github.com/google-coral/edgetpu/raw/75e675633c2110a991426c8afa64f122b16ac372/test_data/mobilenet_ssd_v2_coco_quant_postprocess_edgetpu.tflite -O /edgetpu_model.tflite
-RUN wget -q https://github.com/google-coral/edgetpu/raw/75e675633c2110a991426c8afa64f122b16ac372/test_data/coco_labels.txt -O /labelmap.txt
-RUN wget -q https://storage.googleapis.com/download.tensorflow.org/models/tflite/coco_ssd_mobilenet_v1_1.0_quant_2018_06_29.zip -O /cpu_model.zip \
- && unzip /cpu_model.zip detect.tflite -d / \
- && mv /detect.tflite /cpu_model.tflite \
- && rm /cpu_model.zip
+ARG MODEL_REFS=7064b94dd5b996189242320359dbab8b52c94a84
+RUN wget -q https://github.com/google-coral/edgetpu/raw/$MODEL_REFS/test_data/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite -O /edgetpu_model.tflite
+RUN wget -q https://github.com/google-coral/edgetpu/raw/$MODEL_REFS/test_data/coco_labels.txt -O /labelmap.txt
+RUN wget -q https://github.com/google-coral/edgetpu/raw/$MODEL_REFS/test_data/ssd_mobilenet_v2_coco_quant_postprocess.tflite -O /cpu_model.tflite
 
 # piwheels opencv build workaround: https://github.com/piwheels/packages/issues/59
 ENV LD_PRELOAD="/usr/lib/arm-linux-gnueabihf/libatomic.so.1"
