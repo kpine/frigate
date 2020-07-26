@@ -34,7 +34,7 @@ RUN install_packages \
       libtiff5 \
       libwebp6 \
 # Coral EdgeTPU dependencies
-      libedgetpu1-max=14.0 \
+      libedgetpu1-max=14.1 \
 # Frigate dependencies
       python3-numpy \
       python3-scipy \
